@@ -1,0 +1,15 @@
+{
+  "name": "stage-newsletter",
+  "version": "1.0.0",
+  "description": "Merges data into newsletter template and post to SendGrid",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "allenheltondev",
+  "license": "ISC",
+  "devDependencies": {
+    "@sendgrid/client": "^7.7.0",
+    "handlebars": "^4.7.7"
+  }
+}

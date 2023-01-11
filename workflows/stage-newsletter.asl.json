@@ -1,0 +1,276 @@
+{
+  "Comment": "Stages a newsletter in SendGrid for publishing",
+  "StartAt": "Get Existing Newsletter",
+  "States": {
+    "Get Existing Newsletter": {
+      "Type": "Task",
+      "Resource": "${DynamodbGetItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S.$": "States.Format('{}#{}', $.commit, $.fileName)"
+          },
+          "sk": {
+            "S": "newsletter"
+          }
+        }
+      },
+      "Next": "Has Newsletter Been Processed?",
+      "ResultPath": "$.existingNewsletter"
+    },
+    "Has Newsletter Been Processed?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.existingNewsletter.Item",
+            "IsPresent": true
+          },
+          "Next": "Save Newsletter Record"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.existingNewsletter.Item",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.existingNewsletter.Item.status.S",
+              "StringEquals": "failed"
+            }
+          ],
+          "Next": "Save Newsletter Record"
+        }
+      ],
+      "Default": "Success - Duplicate Request"
+    },
+    "Save Newsletter Record": {
+      "Type": "Task",
+      "Resource": "${DynamodbPutItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Item": {
+          "pk": {
+            "S.$": "States.Format('{}#{}', $.commit, $.fileName)"
+          },
+          "sk": {
+            "S": "newsletter"
+          },
+          "status": {
+            "S": "in progress"
+          }
+        }
+      },
+      "Next": "Get Sponsor List",
+      "ResultPath": null
+    },
+    "Get Sponsor List": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket": "${Bucket}",
+        "Key": "sponsors/sponsors.json"
+      },
+      "Resource": "${S3GetObject}",
+      "ResultSelector": {
+        "list.$": "States.StringToJson($.Body)"
+      },
+      "ResultPath": "$.sponsors",
+      "Next": "Parse Newsletter"
+    },
+    "Parse Newsletter": {
+      "Type": "Task",
+      "Resource": "${LambdaInvoke}",
+      "Parameters": {
+        "FunctionName": "${ParseNewsletterFunction}",
+        "Payload": {
+          "content.$": "$$.Execution.Input.content",
+          "sponsors.$": "$.sponsors.list.sponsors"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Update Newsletter Record (Failure)"
+        }
+      ],
+      "OutputPath": "$.Payload",
+      "Next": "Stage In SendGrid"
+    },
+    "Stage In SendGrid": {
+      "Type": "Task",
+      "Resource": "${LambdaInvoke}",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${StageNewsletterFunction}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Save Records",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Update Newsletter Record (Failure)"
+        }
+      ],
+      "ResultPath": "$.sendgrid"
+    },
+    "Update Newsletter Record (Failure)": {
+      "Type": "Task",
+      "Resource": "${DynamodbUpdateItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S.$": "States.Format('{}#{}', $$.Execution.Input.commit, $$.Execution.Input.fileName)"
+          },
+          "sk": {
+            "S": "newsletter"
+          }
+        },
+        "UpdateExpression": "SET #status = :status",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "failed"
+          }
+        }
+      },
+      "End": true,
+      "ResultPath": null
+    },
+    "Save Records": {
+      "Type": "Parallel",
+      "Next": "Notify of Success",
+      "Branches": [
+        {
+          "StartAt": "Save Newsletter",
+          "States": {
+            "Save Newsletter": {
+              "Type": "Task",
+              "Resource": "${DynamodbPutItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Item": {
+                  "pk": {
+                    "S.$": "$$.Execution.Input.fileName"
+                  },
+                  "sk": {
+                    "S": "newsletter"
+                  },
+                  "GSI1PK": {
+                    "S": "newsletter"
+                  },
+                  "GSI1SK": {
+                    "S.$": "$.sendAtDate"
+                  },
+                  "singleSendId": {
+                    "S.$": "$.sendgrid.Payload.id"
+                  }
+                }
+              },
+              "ResultPath": null,
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Update Newsletter Record (success)",
+          "States": {
+            "Update Newsletter Record (success)": {
+              "Type": "Task",
+              "Resource": "${DynamodbUpdateItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Key": {
+                  "pk": {
+                    "S.$": "States.Format('{}#{}', $$.Execution.Input.commit, $$.Execution.Input.fileName)"
+                  },
+                  "sk": {
+                    "S": "newsletter"
+                  }
+                },
+                "UpdateExpression": "SET #status = :status",
+                "ExpressionAttributeNames": {
+                  "#status": "status"
+                },
+                "ExpressionAttributeValues": {
+                  ":status": {
+                    "S": "succeeded"
+                  }
+                }
+              },
+              "ResultPath": null,
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": null
+    },
+    "Notify of Success": {
+      "Type": "Task",
+      "Resource": "${LambdaInvoke}",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${SendEmailFunction}",
+        "Payload": {
+          "to": "${AdminEmail}",
+          "subject.$": "States.Format('[Staged] {}', $.subject)",
+          "html.$": "States.Format('<p>The newsletter was successfully staged.</p><p><a href=\"https://mc.sendgrid.com/single-sends/{}/review\">Click to view</a></p>', $.sendgrid.Payload.id)"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Success"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Success - Duplicate Request": {
+      "Type": "Succeed",
+      "Comment": "This newsletter has already been processed"
+    }
+  }
+}

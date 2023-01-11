@@ -1,0 +1,165 @@
+{
+  "Comment": "Send an email reminder to the sponsor of the newsletter for a new ad copy",
+  "StartAt": "Get Calendar",
+  "States": {
+    "Get Calendar": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket": "${Bucket}",
+        "Key": "sponsors/sponsor-calendar.json"
+      },
+      "Resource": "${S3GetObject}",
+      "ResultSelector": {
+        "schedule.$": "States.StringToJson($.Body)"
+      },
+      "Next": "Get Upcoming Sponsored Slot"
+    },
+    "Get Upcoming Sponsored Slot": {
+      "Type": "Task",
+      "Resource": "${LambdaInvoke}",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${GetNextNewsletterDateFunction}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Has Sponsor?"
+    },
+    "Has Sponsor?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Payload.slot",
+          "IsPresent": true,
+          "Next": "Get Sponsor List"
+        }
+      ],
+      "Default": "Nothing To Do"
+    },
+    "Get Sponsor List": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket": "${Bucket}",
+        "Key": "sponsors/sponsors.json"
+      },
+      "Resource": "${S3GetObject}",
+      "ResultSelector": {
+        "list.$": "States.StringToJson($.Body)"
+      },
+      "ResultPath": "$.sponsors",
+      "Next": "Format State"
+    },
+    "Format State": {
+      "Type": "Pass",
+      "Parameters": {
+        "slot.$": "$.Payload.slot",
+        "sponsors.$": "$.sponsors.list.sponsors"
+      },
+      "Next": "Find Sponsor"
+    },
+    "Find Sponsor": {
+      "Type": "Map",
+      "End": true,
+      "Iterator": {
+        "StartAt": "Is Correct Sponsor?",
+        "States": {
+          "Is Correct Sponsor?": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.sponsor.name",
+                "StringEqualsPath": "$.slot.sponsor",
+                "Next": "Send Email To Sponsor"
+              }
+            ],
+            "Default": "End"
+          },
+          "Send Email To Sponsor": {
+            "Type": "Task",
+            "Resource": "${LambdaInvoke}",
+            "OutputPath": "$.Payload",
+            "Parameters": {
+              "FunctionName": "${SendEmailFunction}",
+              "Payload": {
+                "to.$": "$.sponsor.contact.email",
+                "subject.$": "States.Format('${NewsletterName} Ad Copy Reminder ({})', $.slot.date)",
+                "text.$": "States.Format('Happy Wednesday {}!\r\rThis is a friendly reminder to submit your ad copy for your upcoming sponsored ad in the ${NewsletterName} newsletter by Friday at 8pm CST. \r\n\r\nFor the issue released on {}, you can send your ad copy by replying to this email. If you want to use the same copy as the previous issue, no further action is required. \r\n\r\nIf you have an issues meeting the deadline or have any other questions, please let me know as soon as possible.\r\n\r\nHave a great rest of your week!', $.sponsor.contact.name, $.slot.date)"
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Notify Of Failure"
+              }
+            ]
+          },
+          "Notify Of Failure": {
+            "Type": "Task",
+            "Resource": "${LambdaInvoke}",
+            "OutputPath": "$.Payload",
+            "Parameters": {
+              "FunctionName": "${SendEmailFunction}",
+              "Payload": {
+                "to": "${AdminEmail}",
+                "subject": "Failed To Send Email Reminder",
+                "text": "Something went wrong trying to notify the sponsor of this week's newsletter ad copy."
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "End"
+          },
+          "End": {
+            "Type": "Pass",
+            "End": true
+          }
+        }
+      },
+      "ItemsPath": "$.sponsors",
+      "Parameters": {
+        "sponsor.$": "$$.Map.Item.Value",
+        "slot.$": "$.slot"
+      }
+    },
+    "Nothing To Do": {
+      "Type": "Succeed"
+    }
+  }
+}

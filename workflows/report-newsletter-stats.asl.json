@@ -1,0 +1,180 @@
+{
+  "Comment": "Send an email report of how the latest newsletter performed",
+  "StartAt": "Get Last Newsletter",
+  "States": {
+    "Get Last Newsletter": {
+      "Type": "Task",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "IndexName": "${IndexName}",
+        "KeyConditionExpression": "#GSI1PK = :GSI1PK",
+        "ExpressionAttributeNames": {
+          "#GSI1PK": "GSI1PK"
+        },
+        "ExpressionAttributeValues": {
+          ":GSI1PK": {
+            "S": "newsletter"
+          }
+        },
+        "ScanIndexForward": false,
+        "Limit": 1
+      },
+      "Resource": "${DynamodbQuery}",
+      "Next": "Parallel"
+    },
+    "Parallel": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Get Stats From SendGrid",
+          "States": {
+            "Get Stats From SendGrid": {
+              "Type": "Task",
+              "Resource": "${LambdaInvoke}",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "FunctionName": "${SendApiRequestFunction}",
+                "Payload": {
+                  "secretKey": "sendgrid",
+                  "auth": {
+                    "location": "header",
+                    "key": "Authorization",
+                    "prefix": "Bearer"
+                  },
+                  "request": {
+                    "method": "GET",
+                    "baseUrl.$": "States.Format('https://api.sendgrid.com/v3/marketing/stats/singlesends/{}', $.Items[0].singleSendId.S)",
+                    "query": {
+                      "start_date.$": "States.ArrayGetItem(States.StringSplit($.Items[0].GSI1SK.S, 'T'), 0)"
+                    }
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Get Subscriber Count",
+          "States": {
+            "Get Subscriber Count": {
+              "Type": "Task",
+              "Resource": "${LambdaInvoke}",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "FunctionName": "${SendApiRequestFunction}",
+                "Payload": {
+                  "secretKey": "sendgrid",
+                  "auth": {
+                    "location": "header",
+                    "key": "Authorization",
+                    "prefix": "Bearer"
+                  },
+                  "request": {
+                    "method": "GET",
+                    "baseUrl": "https://api.sendgrid.com/v3/marketing/lists/${ListId}"
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Set New Subscriber Count"
+            },
+            "Set New Subscriber Count": {
+              "Type": "Task",
+              "Resource": "${DynamodbPutItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Item": {
+                  "pk": {
+                    "S": "newsletter"
+                  },
+                  "sk": {
+                    "S.$": "States.Format('subscribers#{}', States.ArrayGetItem(States.StringSplit($$.Execution.StartTime, 'T'), 0))"
+                  },
+                  "count": {
+                    "S.$": "States.Format('{}', $.contact_count)"
+                  }
+                }
+              },
+              "End": true,
+              "ResultPath": null
+            }
+          }
+        },
+        {
+          "StartAt": "Load Previous Subscriber Count",
+          "States": {
+            "Load Previous Subscriber Count": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "TableName": "${TableName}",
+                "KeyConditionExpression": "#pk = :pk and begins_with(#sk, :sk)",
+                "ExpressionAttributeNames": {
+                  "#pk": "pk",
+                  "#sk": "sk"
+                },
+                "ExpressionAttributeValues": {
+                  ":pk": {
+                    "S": "newsletter"
+                  },
+                  ":sk": {
+                    "S": "subscribers#"
+                  }
+                },
+                "ScanIndexForward": false,
+                "Limit": 1
+              },
+              "Resource": "${DynamodbQuery}"
+            }
+          }
+        }
+      ],
+      "Next": "Send Update Email",
+      "ResultPath": "$.data"
+    },
+    "Send Update Email": {
+      "Type": "Task",
+      "Resource": "${EventBridgePutEvents}",
+      "Parameters": {
+        "Entries": [
+          {
+            "Detail": {
+              "subject": "Newsletter Stats This Week",
+              "to": "${AdminEmail}",
+              "html.$": "States.Format('<p>Here are the stats from your recent newsletter.</p><ul><li><b>Delivered:</b> {}</li><li><b>Opens:</b> {}</li><li><b>Bounces:</b> {}</li><li><b>Clicks:</b> {}</li></ul><p>You now have <b>{} subscribers</b>, compared to <b>{} last week</b>.</p><p><a href=\"https://mc.sendgrid.com/single-sends/{}/stats\">View full report</a><p>', $.data[0].results[0].stats.delivered, $.data[0].results[0].stats.unique_opens, $.data[0].results[0].stats.bounces, $.data[0].results[0].stats.clicks, $.data[1].contact_count, $.data[2].Items[0].count.S, $.Items[0].singleSendId.S)"
+            },
+            "DetailType": "Send Email",
+            "Source": "user.GetNewsletterStats"
+          }
+        ]
+      },
+      "End": true
+    }
+  }
+}

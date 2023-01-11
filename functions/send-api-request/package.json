@@ -1,0 +1,14 @@
+{
+  "name": "send-api-request",
+  "version": "1.0.0",
+  "description": "Sends an API request via axios",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "allenheltondev",
+  "license": "ISC",
+  "devDependencies": {
+    "axios": "^1.2.1"
+  }
+}

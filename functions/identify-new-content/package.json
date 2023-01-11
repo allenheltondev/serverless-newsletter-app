@@ -1,0 +1,15 @@
+{
+  "name": "identify-new-content",
+  "version": "1.0.0",
+  "description": "Identifies if new content was recently published",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "allenheltondev",
+  "license": "ISC",
+  "devDependencies": {
+    "octokit": "^2.0.10",
+    "@aws-sdk/client-sfn": "^3.229.0"
+  }
+}

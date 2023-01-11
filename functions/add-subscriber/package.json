@@ -1,0 +1,14 @@
+{
+  "name": "add-subscriber",
+  "version": "1.0.0",
+  "description": "Subscribes an email address to the configured distribution list",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "allenheltondev",
+  "license": "ISC",
+  "devDependencies": {
+    "@sendgrid/client": "^7.7.0"
+  }
+}

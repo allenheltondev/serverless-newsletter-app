@@ -1,0 +1,437 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Newsletter infrastructure
+
+Parameters:
+  TableName:
+    Type: String
+    Default: newsletter
+  GSI1:
+    Type: String
+    Default: GSI1  
+  GitHubPAT:
+    Type: String
+    Description: PAT to load newsletter markdown content from your repository
+  GitHubOwner:
+    Type: String
+    Description: Owner's username of the GitHub repository that holds newsletter content
+  GitHubRepo:
+    Type: String
+    Description: Repository name of the newsletter content
+  SendgridApiKey:
+    Type: String
+    Description: Api Key of the SendGrid account that will send the newsletter
+  DistributionListId:
+    Type: String
+    Description: Identifier of the SendGrid distribution list you wish to send the newsletter to
+  SendgridSenderId:
+    Type: String
+    Description: Identifier of the SendGrid email address that sends emails for your newsletter
+  SendgridFromEmail:
+    Type: String
+    Description: Email address that sends emails for the newsletter
+  NewsletterTemplateId:
+    Type: String
+    Description: Identifier of the SendGrid dynamic template that holds the templated html for your newsletter
+  NewsletterTemplateVersionId:
+    Type: String
+    Description: Identifier of the specific version of the SendGrid dynamic template  
+  CorsDomain:
+    Type: String
+    Description: Url of the site that hosts your newsletter. Used for subscribing members  
+  AdminEmail:
+    Type: String
+    Description: Your personal email address or email address to notify when things go wrong and to send reports to
+  AmplifyProjectId:
+    Type: String
+    Description: Identifier of the Amplify project that triggers the process of staging a newsletter
+  NewsletterName:
+    Type: String
+    Description: Friendly name of your newsletter
+
+Globals:
+  Function:
+    Runtime: nodejs14.x # Set to this because the version of SAM in the amplify build only supports up to 14
+    Architectures:
+      - arm64
+    Tracing: Active
+    Timeout: 15
+    MemorySize: 1024
+    Handler: index.handler
+    Layers:
+      - !Ref SharedLayer
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+  Api:
+    Cors:
+      AllowMethods: "'POST,OPTIONS'"
+      AllowHeaders: "'Content-Type'"
+      AllowOrigin: !Sub "'${CorsDomain}'"
+
+Resources:
+  NewsletterBucket:
+    Type: AWS::S3::Bucket
+
+  NewsletterTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST      
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: !Ref GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  NewsletterApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      TracingEnabled: true
+      StageName: prod
+      MethodSettings:
+        - MetricsEnabled: True
+          ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: ERROR
+          DataTraceEnabled: True
+      DefinitionBody:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: ./openapi.yaml
+
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Metadata:
+      BuildMethod: nodejs14.x
+      BuildArchitecture: arm64
+    Properties:
+      ContentUri: layers/
+      CompatibleRuntimes:
+        - nodejs14.x
+
+  AddSubscriberFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/add-subscriber
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref AuthTokensSecret
+      Environment:
+        Variables:
+          SECRET_ID: !Ref AuthTokensSecret
+          LIST_ID: !Ref DistributionListId
+          CORS_ALLOWED_ORIGIN: !Ref CorsDomain
+      Events:
+        FromApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref NewsletterApi
+            Path: /subscribers
+            Method: POST
+
+  AuthTokensSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      SecretString:
+        Fn::Sub:
+          - |-
+            {
+              "github": "${GitHubPAT}",
+              "sendgrid":"${SengridApiKey}"
+            }
+          - GitHubPAT: !Ref GitHubPAT
+            SengridApiKey: !Ref SendgridApiKey
+
+  SendEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/send-email
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref AuthTokensSecret
+      Environment:
+        Variables:
+          SECRET_ID: !Ref AuthTokensSecret
+          FROM_EMAIL: !Ref SendgridFromEmail
+      Events:
+        SendMailEvent:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              detail-type:
+                - Send Email
+
+  GetNextNewsletterDateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/get-next-newsletter-date
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+  SendAdCopyReminderStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: workflows/newsletter-ad-copy-reminder.asl.json
+      DefinitionSubstitutions:
+        S3GetObject: !Sub arn:${AWS::Partition}:states:::aws-sdk:s3:getObject
+        Bucket: !Ref NewsletterBucket
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        GetNextNewsletterDateFunction: !GetAtt GetNextNewsletterDateFunction.Arn
+        SendEmailFunction: !GetAtt SendEmailFunction.Arn
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:getObject
+              Resource:
+                - !Sub ${NewsletterBucket.Arn}/*
+            - Effect: Allow
+              Action: 
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt GetNextNewsletterDateFunction.Arn
+                - !GetAtt SendEmailFunction.Arn
+      Events:
+        Trigger:
+          Type: Schedule
+          Properties:
+            Schedule: "cron(0 15 ? * WED *)"
+
+  StageNewsletterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/stage-newsletter
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref AuthTokensSecret
+      Environment:
+        Variables:
+          SECRET_ID: !Ref AuthTokensSecret
+          LIST_ID: !Ref DistributionListId
+          SENDER_ID: !Ref SendgridSenderId
+          TEMPLATE_ID: !Ref NewsletterTemplateId
+          VERSION_ID: !Ref NewsletterTemplateVersionId
+
+  ParseNewsletterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/parse-newsletter
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Environment:
+        Variables:
+          NEWSLETTER_BASE_URL: !Sub ${CorsDomain}/newsletter
+          NEWSLETTER_NAME: !Ref NewsletterName
+
+  IdentifyNewNewslettersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/identify-new-content
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref AuthTokensSecret
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: 
+                - !Ref StageNewsletterStateMachine
+      Environment:
+        Variables:
+          SECRET_ID: !Ref AuthTokensSecret
+          OWNER: !Ref GitHubOwner
+          REPO: !Ref GitHubRepo
+          COMMIT_TIME_TOLERANCE_MINUTES: 10
+          STATE_MACHINE_ARN: !Ref StageNewsletterStateMachine
+          PATH: content/newsletter
+          NEW_CONTENT_INDICATOR: "[newsletter]"
+      Events:
+        AmplifyBuildSuccessful:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.amplify
+              detail-type:
+                - Amplify Deployment Status Change
+              detail:
+                appId: 
+                  - !Ref AmplifyProjectId
+                jobStatus:
+                  - SUCCEED
+
+  SendApiRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/send-api-request
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref AuthTokensSecret
+      Environment:
+        Variables:
+          SECRET_ID: !Ref AuthTokensSecret
+
+  StageNewsletterStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: workflows/stage-newsletter.asl.json
+      DefinitionSubstitutions:
+        DynamodbGetItem: !Sub arn:${AWS::Partition}:states:::dynamodb:getItem
+        TableName: !Ref TableName
+        DynamodbPutItem: !Sub arn:${AWS::Partition}:states:::dynamodb:putItem
+        S3GetObject: !Sub arn:${AWS::Partition}:states:::aws-sdk:s3:getObject
+        Bucket: !Ref NewsletterBucket
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        ParseNewsletterFunction: !GetAtt ParseNewsletterFunction.Arn
+        StageNewsletterFunction: !GetAtt StageNewsletterFunction.Arn
+        DynamodbUpdateItem: !Sub arn:${AWS::Partition}:states:::dynamodb:updateItem
+        SendEmailFunction: !GetAtt SendEmailFunction.Arn
+        AdminEmail: !Ref AdminEmail
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub arn:${AWS::Partition}:s3:::${NewsletterBucket}/*
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt SendEmailFunction.Arn
+                - !GetAtt StageNewsletterFunction.Arn
+                - !GetAtt ParseNewsletterFunction.Arn
+
+  SendAdCopyReminderStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: workflows/sponsor-ad-copy-reminder.asl.json
+      DefinitionSubstitutions:
+        S3GetObject: !Sub arn:${AWS::Partition}:states:::aws-sdk:s3:getObject
+        Bucket: !Ref NewsletterBucket
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        GetNextNewsletterDateFunction: !GetAtt GetNextNewsletterDateFunction.Arn
+        SendEmailFunction: !GetAtt SendEmailFunction.Arn
+        NewsletterName: !Ref NewsletterName
+        AdminEmail: !Ref AdminEmail
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:getObject
+              Resource:
+                - !Sub arn:${AWS::Partition}:s3:::${NewsletterBucket}/*
+            - Effect: Allow
+              Action: 
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt GetNextNewsletterDateFunction.Arn
+                - !GetAtt SendEmailFunction.Arn
+      Events:
+        Trigger:
+          Type: Schedule
+          Properties:
+            Schedule: "cron(0 15 ? * WED *)"
+
+  ReportNewsletterStatsStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      DefinitionUri: workflows/report-newsletter-stats.asl.json
+      DefinitionSubstitutions:
+        DynamodbQuery: !Sub arn:${AWS::Partition}:states:::aws-sdk:dynamodb:query
+        TableName: !Ref TableName
+        IndexName: !Ref GSI1
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        SendApiRequestFunction: !GetAtt SendApiRequestFunction.Arn
+        DynamodbPutItem: !Sub arn:${AWS::Partition}:states:::dynamodb:putItem
+        EventBridgePutEvents: !Sub arn:${AWS::Partition}:states:::events:putEvents
+        AdminEmail: !Ref AdminEmail
+        ListId: !Ref DistributionListId
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:putItem
+                - dynamodb:query
+              Resource:
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+            - Effect: Allow
+              Action:
+                - dynamodb:query
+              Resource:
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/${GSI1}
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt SendApiRequestFunction.Arn
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource:
+                - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default
+      Events:
+        Trigger:
+          Type: Schedule
+          Properties:
+            Schedule: "cron(0 15 ? * FRI *)"

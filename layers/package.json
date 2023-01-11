@@ -1,0 +1,22 @@
+{
+  "name": "newsletter-dependency-layer",
+  "version": "1.0.0",
+  "description": "Lambda layer for dependencies and shared secret management",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "allenheltondev",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.231.0",
+    "@aws-sdk/client-sfn": "^3.231.0",
+    "@github-docs/frontmatter": "^1.3.1",
+    "@sendgrid/client": "^7.7.0",
+    "@sendgrid/mail": "^7.7.0",
+    "axios": "^1.2.1",
+    "handlebars": "^4.7.7",
+    "octokit": "^2.0.10",
+    "showdown": "^2.1.0"
+  }
+}
