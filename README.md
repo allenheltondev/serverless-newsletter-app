@@ -23,7 +23,7 @@ In an ideal workflow, the business process is as follows:
 
 1. Write your newsletter in markdown in your GitHub repo in a designated newsletter folder
 2. Commit and push the newsletter to your repo with the phrase *[newsletter]* at the beginning of your commit message
-3. You AWS Amplify autobuild will run and complete successfully
+3. AWS Amplify autobuild will run and complete successfully
 4. On success, a Lambda function runs that queries your GitHub account and looks for new files in your newsletter folder in the commit that contained *[newsletter]* in the message
 5. The Lambda function triggers a Step Function workflow that will parse the content of your newsletter and pass it along to a dynamic template in SendGrid
 6. The workflow sends you an email with the direct link to SendGrid for you to review and schedule
